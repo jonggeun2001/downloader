@@ -172,3 +172,9 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# download_images 디렉토리와 그 하위 내용을 git에서 제외
+download_images/
+
+.DS_Store
+
