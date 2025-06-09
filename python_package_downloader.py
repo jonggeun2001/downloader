@@ -129,12 +129,6 @@ def get_package_dependencies(package_name: str, version: Optional[str] = None) -
         else:
             version_str = version
 
-    # 이미 처리된 패키지인지 확인 (버전 무시)
-    package_key = package_name.lower()
-    if package_key in processed_packages:
-        print(f"[SKIP] 의존성 파싱 건너뜀: {package_name}")
-        return dependencies
-
     url = f"https://pypi.org/pypi/{package_name}/json"
     try:
         response = requests.get(url)
@@ -165,7 +159,11 @@ def get_package_dependencies(package_name: str, version: Optional[str] = None) -
             if m:
                 dep_name = m.group(1)
                 dep_version = m.group(2).strip() if m.group(2) else None
-                dependencies.add((dep_name, dep_version))
+                # 이미 처리된 패키지인지 확인 (버전 무시)
+                if dep_name.lower() not in processed_packages:
+                    dependencies.add((dep_name, dep_version))
+                else:
+                    print(f"[SKIP] 의존성에서 제외: {dep_name} (이미 처리됨)")
     except Exception as e:
         print(f"PyPI 의존성 파싱 오류: {package_name} {version_str}: {e}")
     return dependencies
