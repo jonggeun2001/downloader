@@ -336,105 +336,81 @@ def is_compatible_wheel(filename, python_version):
         # 플랫폼 독립적인 wheel 파일
         return 'any' in platform_tag
 
-def get_package_files(package_name, version=None, python_version=None):
-    """
-    PyPI에서 패키지의 모든 파일 정보를 가져옵니다.
+def get_package_files(package_name: str, version: str, python_version: str) -> list:
+    """패키지의 파일 정보를 가져옵니다."""
+    files = []
     
-    Args:
-        package_name (str): 패키지 이름
-        version (str, optional): 패키지 버전
-        python_version (str, optional): Python 버전
-    
-    Returns:
-        list: (url, filename, platform) 튜플의 리스트
-    """
-    # 버전 문자열에서 연산자 제거 (예: '==1.2.3' -> '1.2.3')
-    version_str = None
-    version_spec = None
-    if version:
-        m = re.match(r'^([^\d]*)([\d.]+)', version)
-        if m:
-            version_spec = m.group(1)  # 연산자 (==, >=, <= 등)
-            version_str = m.group(2)   # 버전 숫자
-        else:
-            version_str = version
-
-    print(f"PyPI API 호출: {package_name} (요청 버전: {version if version else '최신'})")
-    url = f"https://pypi.org/pypi/{package_name}/json"
     try:
+        # PyPI API 호출
+        url = f"https://pypi.org/pypi/{package_name}/{version}/json"
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()
-        releases = data.get('releases', {})
         
-        # 버전이 지정된 경우 해당 버전만, 아니면 식에 맞는 버전 1개만 찾기
-        if version_str and version_str in releases and releases[version_str]:
-            target_versions = [version_str]
+        # 파일 정보 파싱
+        releases = data.get('releases', {})
+        if not releases:
+            return files
+            
+        # 버전 조건에 맞는 릴리즈 찾기
+        target_version = None
+        if version:
+            # 버전 조건 파싱
+            version_spec = version.strip()
+            if version_spec.startswith('=='):
+                target_version = version_spec[2:]
+            elif version_spec.startswith('>='):
+                min_version = version_spec[2:]
+                # 최신 버전 선택
+                target_version = max(releases.keys(), key=lambda x: packaging.version.parse(x))
+            elif version_spec.startswith('<'):
+                max_version = version_spec[1:]
+                # 최신 버전 선택
+                target_version = max(releases.keys(), key=lambda x: packaging.version.parse(x))
+            else:
+                # 기본적으로 최신 버전 선택
+                target_version = max(releases.keys(), key=lambda x: packaging.version.parse(x))
         else:
-            # 버전 문자열 연산자에 맞는 버전 1개만 찾기
-            available_versions = [v for v in releases.keys() if releases[v]]
-            if not available_versions:
-                print(f"  [경고] {package_name}의 사용 가능한 릴리즈가 없습니다.")
-                return []
+            # 버전이 지정되지 않은 경우 최신 버전 선택
+            target_version = max(releases.keys(), key=lambda x: packaging.version.parse(x))
             
-            # 버전 조건이 있는 경우 해당 조건에 맞는 버전 찾기
-            if version_spec:
-                try:
-                    spec = packaging.specifiers.SpecifierSet(f"{version_spec}{version_str}")
-                    matching_versions = [v for v in available_versions if spec.contains(v)]
-                    if matching_versions:
-                        # 조건에 맞는 버전 중 가장 최신 버전 선택
-                        target_versions = [sorted(matching_versions, key=packaging.version.parse, reverse=True)[0]]
-                        print(f"  [알림] 버전 조건 '{version_spec}{version_str}'에 맞는 버전 {target_versions[0]}을(를) 선택했습니다.")
-                    else:
-                        print(f"  [경고] 버전 조건 '{version_spec}{version_str}'에 맞는 버전이 없습니다.")
-                        return []
-                except packaging.specifiers.InvalidSpecifier:
-                    print(f"  [경고] 잘못된 버전 조건: {version_spec}{version_str}")
-                    return []
-            else:
-                # 버전 조건이 없는 경우 최신 버전 선택
-                target_versions = [sorted(available_versions, key=packaging.version.parse, reverse=True)[0]]
-                print(f"  [알림] 최신 버전 {target_versions[0]}을(를) 선택했습니다.")
-
-        files = []
-        for ver in target_versions:
-            release_files = releases[ver]
-            # whl 파일이 있는지 확인
-            whl_files = [f for f in release_files if f['filename'].endswith('.whl')]
-            if whl_files:
-                # Python 버전과 아키텍처에 맞는 wheel 파일 필터링
-                compatible_wheels = []
-                for wheel in whl_files:
-                    filename = wheel['filename']
-                    if is_compatible_wheel(filename, python_version):
-                        compatible_wheels.append(wheel)
-                        print(f"  호환되는 wheel 파일 발견: {filename}")
-                
-                if compatible_wheels:
-                    selected_files = compatible_wheels
-                else:
-                    # 호환되는 wheel 파일이 없는 경우 소스 배포판 사용
-                    selected_files = [f for f in release_files if f['filename'].endswith('.tar.gz')]
-                    print(f"  호환되는 wheel 파일이 없어 소스 배포판을 사용합니다.")
-            else:
-                selected_files = [f for f in release_files if f['filename'].endswith('.tar.gz')]
+        if not target_version:
+            print(f"  [경고] {package_name} {version}에 대한 호환되는 버전을 찾을 수 없습니다.")
+            return files
             
-            for file_info in selected_files:
-                url = file_info['url']
-                filename = file_info['filename']
-                # 플랫폼 식별
-                platform = None
-                if 'win' in filename.lower():
-                    platform = 'win'
-                elif 'linux' in filename.lower():
-                    platform = 'linux'
+        # 선택된 버전의 파일들 처리
+        for file_info in releases[target_version]:
+            filename = file_info['filename']
+            url = file_info['url']
+            
+            # wheel 파일인 경우
+            if filename.endswith('.whl'):
+                # Python 버전 호환성 확인
+                wheel_info = parse_wheel_tag(filename)
+                if not wheel_info:
+                    continue
+                    
+                # Python 버전 호환성 확인
+                if not is_python_version_compatible(wheel_info['python_tag'], python_version):
+                    continue
+                    
+                # 플랫폼 호환성 확인
+                platform = get_platform_from_wheel(wheel_info['platform_tag'])
+                if not platform:
+                    continue
+                    
+                print(f"  호환되는 wheel 파일 발견: {filename}")
                 files.append((url, filename, platform))
-                print(f"  파일 발견: {filename} (플랫폼: {platform if platform else '공통'})")
-        return files
-    except requests.exceptions.RequestException as e:
-        print(f"PyPI API 호출 중 오류 발생: {e}")
-        return []
+                
+            # tar.gz 소스 파일인 경우
+            elif filename.endswith('.tar.gz'):
+                print(f"  파일 발견: {filename} (플랫폼: 공통)")
+                files.append((url, filename, 'common'))
+                
+    except Exception as e:
+        print(f"  [경고] 파일 정보를 가져오는 중 오류 발생: {str(e)}")
+        
+    return files
 
 def download_package_files(package_name: str, version: str, python_version: str, processed_packages: set) -> None:
     """패키지 파일을 다운로드합니다."""
