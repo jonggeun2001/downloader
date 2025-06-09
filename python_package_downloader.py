@@ -337,6 +337,69 @@ def download_package_files(package_name, version, target_dirs):
         print(f"    다운로드: {url} -> {target_path}")
         download_file(url, target_path)
 
+def create_install_scripts(target_dirs, python_version):
+    """
+    Windows와 Linux용 설치 스크립트를 생성합니다.
+    
+    Args:
+        target_dirs (dict): 플랫폼별 대상 디렉토리
+        python_version (str): Python 버전
+    """
+    # Windows용 설치 스크립트 생성
+    win_script = f"""@echo off
+setlocal enabledelayedexpansion
+
+echo Python {python_version} 패키지 설치를 시작합니다...
+
+:: pip 설치 확인
+python -m pip --version >nul 2>&1
+if errorlevel 1 (
+    echo pip가 설치되어 있지 않습니다. pip를 설치합니다...
+    python -m ensurepip --default-pip
+)
+
+:: 패키지 설치
+for %%f in (*.whl) do (
+    echo %%f 설치 중...
+    python -m pip install --no-index --find-links=. %%f
+)
+
+echo 설치가 완료되었습니다.
+pause
+"""
+    win_script_path = os.path.join(target_dirs['win'], 'install.bat')
+    with open(win_script_path, 'w', encoding='utf-8') as f:
+        f.write(win_script)
+    print(f"Windows 설치 스크립트 생성됨: {win_script_path}")
+
+    # Linux용 설치 스크립트 생성
+    linux_script = f"""#!/bin/bash
+
+echo "Python {python_version} 패키지 설치를 시작합니다..."
+
+# pip 설치 확인
+if ! command -v pip3 &> /dev/null; then
+    echo "pip가 설치되어 있지 않습니다. pip를 설치합니다..."
+    python3 -m ensurepip --default-pip
+fi
+
+# 패키지 설치
+for file in *.whl; do
+    if [ -f "$file" ]; then
+        echo "$file 설치 중..."
+        python3 -m pip install --no-index --find-links=. "$file"
+    fi
+done
+
+echo "설치가 완료되었습니다."
+"""
+    linux_script_path = os.path.join(target_dirs['linux'], 'install.sh')
+    with open(linux_script_path, 'w', encoding='utf-8') as f:
+        f.write(linux_script)
+    # 실행 권한 부여
+    os.chmod(linux_script_path, 0o755)
+    print(f"Linux 설치 스크립트 생성됨: {linux_script_path}")
+
 def download_packages(requirements_path, python_version):
     """
     requirements.txt 파일에 명시된 패키지와 의존성을 다운로드합니다.
@@ -396,6 +459,9 @@ def download_packages(requirements_path, python_version):
                 future.result()
             except Exception as e:
                 print(f"패키지 다운로드 중 오류 발생: {e}")
+    
+    # 설치 스크립트 생성
+    create_install_scripts(target_dirs, python_version)
 
 def main():
     parser = argparse.ArgumentParser(description='Python 패키지와 의존성을 다운로드합니다.')
