@@ -422,12 +422,12 @@ def download_package_files(package_name, version, target_dirs, python_version):
         target_dirs (dict): 플랫폼별 대상 디렉토리
         python_version (str): Python 버전
     """
-    # 이미 처리된 패키지인지 확인
-    key = (package_name.lower(), version or '')
-    if key in processed_packages:
-        print(f"[SKIP] 이미 처리됨: {package_name} {version if version else ''}")
+    # 이미 처리된 패키지인지 확인 (버전 무시)
+    package_key = package_name.lower()
+    if package_key in processed_packages:
+        print(f"[SKIP] 이미 처리됨: {package_name}")
         return
-    processed_packages.add(key)
+    processed_packages.add(package_key)
 
     print(f"\n패키지 다운로드 시작: {package_name} (버전: {version if version else '최신'})")
     files = get_package_files(package_name, version, python_version)
