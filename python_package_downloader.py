@@ -357,7 +357,7 @@ def is_compatible_wheel(filename, python_version):
         # 플랫폼 독립적인 wheel 파일
         return 'any' in platform_tag
 
-def get_package_files(package_name: str, version: str, python_version: str) -> list:
+def get_package_files(package_name: str, version: str, python_version: str, prefer_min_version=False) -> list:
     """패키지의 파일 정보를 가져옵니다."""
     files = []
     try:
@@ -378,9 +378,13 @@ def get_package_files(package_name: str, version: str, python_version: str) -> l
                 spec = packaging.specifiers.SpecifierSet(version)
                 matching_versions = [v for v in releases.keys() if spec.contains(v)]
                 if matching_versions:
-                    # 조건에 맞는 버전 중 가장 최신 버전 선택
-                    target_version = sorted(matching_versions, key=packaging.version.parse, reverse=True)[0]
-                    print(f"  [알림] 버전 조건 '{version}'에 맞는 버전 {target_version}을(를) 선택했습니다.")
+                    # prefer_min_version이 True면 최소 버전, 아니면 최신 버전
+                    if prefer_min_version:
+                        target_version = sorted(matching_versions, key=packaging.version.parse)[0]
+                        print(f"  [알림] 버전 조건 '{version}'에 맞는 최소 버전 {target_version}을(를) 선택했습니다.")
+                    else:
+                        target_version = sorted(matching_versions, key=packaging.version.parse, reverse=True)[0]
+                        print(f"  [알림] 버전 조건 '{version}'에 맞는 최신 버전 {target_version}을(를) 선택했습니다.")
                 else:
                     print(f"  [경고] 버전 조건 '{version}'에 맞는 버전이 없습니다.")
                     return files
@@ -447,7 +451,7 @@ def download_package_files(package_name: str, version: str, python_version: str,
     
     # PyPI API 호출
     print(f"PyPI API 호출: {package_name} (요청 버전: {version})")
-    files = get_package_files(package_name, version, python_version)
+    files = get_package_files(package_name, version, python_version, True)
     
     if not files:
         print(f"  [경고] {package_name} {version}에 대한 호환되는 파일을 찾을 수 없습니다.")
