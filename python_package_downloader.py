@@ -14,6 +14,10 @@ import concurrent.futures
 from tqdm import tqdm
 import zipfile
 import io
+import packaging.version
+import packaging.specifiers
+
+processed_packages = set()
 
 def find_requirements_file():
     """
@@ -82,97 +86,135 @@ def get_missing_wheel_packages(requirements_path, platform_dir):
     
     return missing_packages
 
-def get_package_dependencies(package_name, version=None):
-    """패키지의 의존성을 가져옵니다.
-    
-    Args:
-        package_name (str): 패키지 이름
-        version (str, optional): 패키지 버전
-        
-    Returns:
-        list: 의존성 패키지 목록 (패키지명, 버전) 튜플의 리스트
-    """
+def get_package_dependencies(package_name, version_spec=None, python_version=None):
+    """패키지의 의존성을 가져옵니다."""
+    if not package_name or package_name.startswith('#'):
+        return []
+
+    # 이미 처리된 패키지는 건너뜁니다
+    if package_name in processed_packages:
+        return []
+
+    processed_packages.add(package_name)
+
     try:
-        # 버전 문자열에서 == 제거
-        clean_version = version.lstrip('=<>!~') if version else None
-        print(f"[DEBUG] get_package_dependencies: {package_name} {version} (clean: {clean_version})")
-        
-        # 항상 /pypi/{패키지명}/json 엔드포인트 사용
-        url = f"https://pypi.org/pypi/{package_name}/json"
+        # 패키지명에서 extras 등을 제거
+        clean_name = package_name.split('[')[0].strip()
+        print(f"[DEBUG] get_package_dependencies: {package_name} {version_spec}")
+
+        url = f"https://pypi.org/pypi/{clean_name}/json"
         print(f"[DEBUG] PyPI API URL: {url}")
+
         response = requests.get(url)
-        response.raise_for_status()
+        if response.status_code != 200:
+            print(f"[WARNING] 패키지 정보를 가져올 수 없습니다: {clean_name}")
+            return []
+
         data = response.json()
         print(f"[DEBUG] PyPI JSON keys: {list(data.keys())}")
-        
-        # 릴리즈 정보에서 버전 선택
-        releases = data.get('releases', {})
-        if not releases:
-            print(f"[DEBUG] No releases found for {package_name}")
-            return []
-        if clean_version and clean_version in releases and releases[clean_version]:
-            target_version = clean_version
-        else:
-            # 가장 최신 버전 사용
+
+        # 버전 선택
+        releases = data['releases']
+        version_to_use = None
+        if version_spec:
+            # 버전 조건 파싱
+            spec = packaging.specifiers.SpecifierSet(version_spec)
             available_versions = [v for v in releases.keys() if releases[v]]
-            if not available_versions:
-                print(f"[DEBUG] No available versions for {package_name}")
+            available_versions = [v for v in available_versions if packaging.version.parse(v) in spec]
+            if available_versions:
+                version_to_use = sorted(available_versions, key=packaging.version.parse)[-1]
+        if not version_to_use:
+            # 조건에 맞는 버전이 없으면 최신 버전 사용
+            available_versions = [v for v in releases.keys() if releases[v]]
+            if available_versions:
+                version_to_use = sorted(available_versions, key=packaging.version.parse)[-1]
+            else:
+                print(f"[DEBUG] 사용 가능한 버전이 없습니다: {clean_name}")
                 return []
-            target_version = sorted(available_versions, key=lambda s: list(map(int, re.findall(r'\\d+', s))), reverse=True)[0]
-            print(f"[DEBUG] 요청한 버전({clean_version})이 없으므로 최신 버전({target_version})으로 대체합니다.")
-        print(f"[DEBUG] Using version: {target_version}")
-        
-        # wheel 파일 URL 찾기
+        print(f"[DEBUG] Using version: {version_to_use}")
+
+        # wheel 파일 찾기
         wheel_url = None
-        for release in releases[target_version]:
+        for release in releases[version_to_use]:
             if release['packagetype'] == 'bdist_wheel':
                 wheel_url = release['url']
                 break
-        print(f"[DEBUG] wheel_url: {wheel_url}")
-        if not wheel_url:
-            return []
-        
-        # wheel 파일 다운로드
-        wheel_response = requests.get(wheel_url)
-        wheel_response.raise_for_status()
-        
-        # METADATA 파일 찾기
-        with zipfile.ZipFile(io.BytesIO(wheel_response.content)) as wheel:
-            metadata_files = [f for f in wheel.namelist() if f.endswith('METADATA')]
-            print(f"[DEBUG] METADATA files: {metadata_files}")
-            if not metadata_files:
-                return []
-            # METADATA 파일 읽기
-            metadata_content = wheel.read(metadata_files[0]).decode('utf-8')
-            print(f"[DEBUG] METADATA content (first 500 chars):\n{metadata_content[:500]}")
-            # 의존성 정보 파싱
-            dependencies = []
-            for line in metadata_content.split('\n'):
-                if line.startswith('Requires-Dist:'):
-                    # 버전 정보 추출
-                    match = re.match(r'Requires-Dist: ([^;]+)(?:;.*)?', line)
-                    if match:
-                        dep = match.group(1).strip()
-                        # extras([...]) 제거
-                        dep = re.sub(r'\[.*?\]', '', dep)
-                        # 괄호 및 그 뒤 내용 제거
-                        dep = re.sub(r'\(.*', '', dep)
-                        # 공백 앞까지만 사용
-                        dep = dep.strip().split(' ')[0]
-                        # 패키지명이 비정상적이면 무시
-                        if not dep or not re.match(r'^[A-Za-z0-9_.\-]+$', dep):
-                            continue
-                        # 버전 정보가 있는 경우 추출
-                        version_match = re.search(r'([<>=!~]+[\d.]+)', match.group(1))
-                        if version_match:
-                            dep_version = version_match.group(1)
-                            dependencies.append((dep, dep_version))
+
+        if wheel_url:
+            print(f"[DEBUG] wheel_url: {wheel_url}")
+            response = requests.get(wheel_url)
+            if response.status_code == 200:
+                with zipfile.ZipFile(io.BytesIO(response.content)) as wheel:
+                    metadata_files = [f for f in wheel.namelist() if f.endswith('METADATA')]
+                    print(f"[DEBUG] METADATA files: {metadata_files}")
+                    if metadata_files:
+                        metadata_content = wheel.read(metadata_files[0]).decode('utf-8')
+                        print(f"[DEBUG] METADATA content:\n{metadata_content}")
+                        dependencies = []
+                        
+                        # 현재 파이썬 버전 정보
+                        if python_version is None:
+                            pyver = f"{sys.version_info.major}.{sys.version_info.minor}"
                         else:
-                            dependencies.append((dep, None))
-            print(f"[DEBUG] Parsed dependencies: {dependencies}")
-            return dependencies
+                            pyver = str(python_version)
+                        pyver_tuple = tuple(map(int, pyver.split('.')))
+                        
+                        for line in metadata_content.split('\n'):
+                            line = line.strip()
+                            if line.startswith('Requires-Dist:'):
+                                dep = line[len('Requires-Dist:'):].strip()
+                                # 환경 마커 처리
+                                marker = None
+                                if ';' in dep:
+                                    dep, marker = dep.split(';', 1)
+                                    dep = dep.strip()
+                                    marker = marker.strip()
+                                # extras 제거 (예: hdfs[avro, dataframe, kerberos] -> hdfs)
+                                dep = re.sub(r'\[.*?\]', '', dep).strip()
+                                # robust 버전조건 파싱: 괄호 유무와 상관없이
+                                dep_name = dep
+                                dep_version_spec = None
+                                # 괄호 버전조건 (예: hdfs (>=2.7.3))
+                                m = re.match(r'^([A-Za-z0-9_.\-]+)\s*\(([^)]*)\)$', dep)
+                                if m:
+                                    dep_name = m.group(1)
+                                    dep_version_spec = m.group(2).replace(' ', '')
+                                else:
+                                    # 괄호 없는 버전조건 (예: hdfs>=2.7.3)
+                                    m2 = re.match(r'^([A-Za-z0-9_.\-]+)\s*([<>=!~]=?.+)$', dep)
+                                    if m2:
+                                        dep_name = m2.group(1)
+                                        dep_version_spec = m2.group(2).replace(' ', '')
+                                # 환경 마커가 있으면 python_version만 우선적으로 처리
+                                if marker:
+                                    m = re.match(r'python_version\s*([<>=!]+)\s*"([0-9.]+)"', marker)
+                                    if m:
+                                        op, ver = m.group(1), m.group(2)
+                                        cmp_tuple = tuple(map(int, ver.split('.')))
+                                        if op == '<':
+                                            if not pyver_tuple < cmp_tuple:
+                                                continue
+                                        elif op == '<=':
+                                            if not pyver_tuple <= cmp_tuple:
+                                                continue
+                                        elif op == '>':
+                                            if not pyver_tuple > cmp_tuple:
+                                                continue
+                                        elif op == '>=':
+                                            if not pyver_tuple >= cmp_tuple:
+                                                continue
+                                        elif op == '==':
+                                            if not pyver_tuple == cmp_tuple:
+                                                continue
+                                        elif op == '!=':
+                                            if not pyver_tuple != cmp_tuple:
+                                                continue
+                                dependencies.append((dep_name, dep_version_spec))
+                        print(f"[DEBUG] Parsed dependencies: {dependencies}")
+                        return dependencies
+        return []
     except Exception as e:
-        print(f"의존성 정보를 가져오는 중 오류 발생: {e}")
+        print(f"[ERROR] 패키지 의존성 파싱 중 오류 발생: {str(e)}")
         return []
 
 def parse_requirements(requirements_path):
@@ -190,46 +232,57 @@ def parse_requirements(requirements_path):
         for line in f:
             line = line.strip()
             if line and not line.startswith('#'):
-                # 버전 정보 추출
-                match = re.match(r'^([^<>=!~]+)([<>=!~].*)?$', line)
-                if match:
-                    package_name = match.group(1).strip()
-                    version = match.group(2).strip() if match.group(2) else None
-                    packages.append((package_name, version))
+                # extras 처리
+                if '[' in line:
+                    package_name = line.split('[')[0].strip()
+                else:
+                    package_name = line
+                
+                # 버전 조건 추출
+                version_spec = None
+                for op in ['==', '>=', '<=', '~=', '!=', '>', '<']:
+                    if op in package_name:
+                        package_name, version_spec = package_name.split(op, 1)
+                        version_spec = f"{op}{version_spec.strip()}"
+                        break
+                
+                package_name = package_name.strip()
+                if package_name:
+                    packages.append((package_name, version_spec))
     return packages
 
 def get_all_dependencies(requirements_path):
-    """requirements.txt 파일의 모든 패키지와 그 의존성을 가져옵니다.
-    
-    Args:
-        requirements_path (str): requirements.txt 파일 경로
-        
-    Returns:
-        set: 모든 패키지와 의존성 목록 (패키지명, 버전) 튜플의 집합
-    """
+    """requirements.txt 파일에서 모든 패키지와 의존성을 재귀적으로 가져옵니다."""
     all_packages = set()
-    
-    def process_dependencies(package_name, version):
-        if (package_name, version) in all_packages:
+    processed_packages.clear()
+
+    def process_dependencies(package_name, version_spec):
+        if (package_name, version_spec) in all_packages:
             return
-            
-        all_packages.add((package_name, version))
-        dependencies = get_package_dependencies(package_name, version)
-        for dep_name, dep_version in dependencies:
-            process_dependencies(dep_name, dep_version)
+        all_packages.add((package_name, version_spec))
+        
+        # 패키지 의존성 가져오기
+        dependencies = get_package_dependencies(package_name, version_spec)
+        
+        # 의존성 처리
+        for dep_name, dep_version_spec in dependencies:
+            # 이미 처리된 패키지는 건너뛰기
+            if (dep_name, dep_version_spec) in all_packages:
+                continue
+            process_dependencies(dep_name, dep_version_spec)
+
+    # requirements.txt 파일 파싱
+    packages = parse_requirements(requirements_path)
     
-    # requirements.txt 파일 읽기
-    with open(requirements_path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#'):
-                # 버전 정보 추출
-                match = re.match(r'([^<>=!~]+)([<>=!~]+[\d.]+)?', line)
-                if match:
-                    package_name = match.group(1).strip()
-                    version = match.group(2) if match.group(2) else None
-                    process_dependencies(package_name, version)
-                    
+    # 각 패키지의 의존성 처리
+    for package_name, version_spec in packages:
+        process_dependencies(package_name, version_spec)
+
+    print(f"총 {len(all_packages)}개의 패키지가 필요합니다.")
+    print("패키지 목록:")
+    for package_name, version_spec in sorted(all_packages, key=lambda x: (x[0], x[1] or '')):
+        print(f"  {package_name} (버전 조건: {version_spec})")
+
     return all_packages
 
 def write_temp_requirements(requirements_path, package_names, temp_path):
@@ -500,71 +553,44 @@ echo "설치가 완료되었습니다."
     os.chmod(linux_script_path, 0o755)
     print(f"Linux 설치 스크립트 생성됨: {linux_script_path}")
 
-def download_packages(requirements_path, python_version):
-    """requirements.txt 파일에 명시된 패키지와 그 의존성을 다운로드합니다.
-    
-    Args:
-        requirements_path (str): requirements.txt 파일 경로
-        python_version (str): Python 버전 (예: "3.12")
-    """
-    if not os.path.exists(requirements_path):
-        print(f"requirements.txt 파일을 찾을 수 없습니다: {requirements_path}")
-        return
-        
-    print(f"requirements.txt 파일을 찾았습니다: {requirements_path}")
-    
-    # 플랫폼별 디렉토리 생성
+def main():
+    parser = argparse.ArgumentParser(description='PyPI API 기반 패키지 직접 다운로드')
+    parser.add_argument('--requirements-path', help='requirements.txt 파일 경로 (지정하지 않으면 자동으로 찾습니다)')
+    parser.add_argument('--python-version', default='3.12', help='Python 버전 (기본값: 3.12)')
+    args = parser.parse_args()
+    requirements_path = args.requirements_path or find_requirements_file()
+    if not requirements_path or not os.path.exists(requirements_path):
+        print('requirements.txt 파일을 찾을 수 없습니다.')
+        sys.exit(1)
+
+    # 다운로드 타겟 디렉토리 생성
+    python_version = args.python_version
     win_dir = f"pypackage_win_x86_64_py{python_version.replace('.', '')}"
     linux_dir = f"pypackage_linux_amd64_py{python_version.replace('.', '')}"
     target_dirs = {'win': win_dir, 'linux': linux_dir}
-    
-    # 기존 디렉토리 삭제
-    for dir_path in [win_dir, linux_dir]:
-        if os.path.exists(dir_path):
-            print(f"기존 디렉토리 삭제: {dir_path}")
-            shutil.rmtree(dir_path)
-        print(f"디렉토리 생성: {dir_path}")
-        os.makedirs(dir_path)
-    
-    # 패키지 의존성 분석
-    print("패키지 의존성 분석 중...")
-    all_packages = get_all_dependencies(requirements_path)
-    print(f"총 {len(all_packages)}개의 패키지가 필요합니다.")
-    print("패키지 목록:")
-    for package_name, version in sorted(all_packages):
-        print(f"  {package_name} (버전: {version if version else 'latest'})")
-    
-    # 패키지 다운로드
-    print("\n패키지 다운로드 시작...")
-    for package_name, version in tqdm(all_packages, desc="패키지 다운로드"):
-        print(f"\n패키지 다운로드 시작: {package_name} (버전: {version if version else 'latest'})")
-        download_package_files(package_name, version, target_dirs, python_version)
-    
-    # 설치 스크립트 생성
-    create_install_scripts(target_dirs, python_version)
+    for d in target_dirs.values():
+        if os.path.exists(d):
+            shutil.rmtree(d)
+        os.makedirs(d)
 
-def main():
-    parser = argparse.ArgumentParser(description='Python 패키지와 의존성을 다운로드합니다.')
-    parser.add_argument('--requirements-path', help='requirements.txt 파일 경로 (지정하지 않으면 자동으로 찾습니다)')
-    parser.add_argument('--python-version', default='3.12', help='Python 버전 (기본값: 3.12)')
-    
-    args = parser.parse_args()
-    
-    # requirements.txt 파일 경로 찾기
-    requirements_path = args.requirements_path
-    if not requirements_path:
-        requirements_path = find_requirements_file()
-        if not requirements_path:
-            print("오류: requirements.txt 파일을 찾을 수 없습니다.")
-            print("현재 디렉토리나 상위 디렉토리에 requirements.txt 파일이 있어야 합니다.")
-            sys.exit(1)
-        print(f"requirements.txt 파일을 찾았습니다: {requirements_path}")
-    
-    if not os.path.exists(requirements_path):
-        print(f"오류: {requirements_path} 파일을 찾을 수 없습니다.")
-        sys.exit(1)
-    
-    download_packages(requirements_path, args.python_version)
+    # 1차: requirements.txt에 명시된 패키지 다운로드
+    packages = parse_requirements(requirements_path)
+    for package_name, version in packages:
+        download_package_files(package_name, version, target_dirs, python_version)
+
+    # 2차: 의존성까지 재귀적으로 다운로드
+    all_packages = get_all_dependencies(requirements_path)
+    for package_name, version_spec in all_packages:
+        # 버전 조건에서 연산자 제거 (예: '==1.2.3' -> '1.2.3')
+        version = None
+        if version_spec:
+            m = re.match(r'^[^\d]*([\d.]+)', version_spec)
+            if m:
+                version = m.group(1)
+        download_package_files(package_name, version, target_dirs, python_version)
+
+    # 기존 pip download 방식은 주석 처리
+    # pip_download(requirements_path, args.python_version)
 
 if __name__ == "__main__":
     main()
