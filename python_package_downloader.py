@@ -341,8 +341,19 @@ def get_package_files(package_name: str, version: str, python_version: str) -> l
     files = []
     
     try:
+        # 버전에서 연산자 제거 (예: '==1.2.3' -> '1.2.3')
+        version_only = None
+        if version:
+            m = re.match(r'.*?([0-9][0-9a-zA-Z\.]*)', version)
+            if m:
+                version_only = m.group(1)
+        
         # PyPI API 호출
-        url = f"https://pypi.org/pypi/{package_name}/{version}/json"
+        if version_only:
+            url = f"https://pypi.org/pypi/{package_name}/{version_only}/json"
+        else:
+            url = f"https://pypi.org/pypi/{package_name}/json"
+            
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()
