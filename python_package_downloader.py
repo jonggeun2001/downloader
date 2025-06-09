@@ -118,54 +118,51 @@ def get_platform_tag() -> str:
     
     return "any"
 
-def get_package_dependencies(package_name: str, version: Optional[str] = None) -> Set[tuple]:
-    """PyPI API를 통해 requires_dist 의존성 정보를 파싱합니다."""
+def get_package_dependencies(package_name: str, version: str, processed_packages: set) -> set:
+    """패키지의 의존성을 가져옵니다."""
     dependencies = set()
-    version_str = None
+    
+    print(f"[의존성 파싱] {package_name} {version if version else ''}")
+    
+    # 버전에서 연산자 제거 (예: '==1.2.3' -> '1.2.3')
+    version_only = None
     if version:
-        m = re.match(r'^[^\d]*([\d.]+)', version)
+        m = re.match(r'.*?([0-9][0-9a-zA-Z\.]*)', version)
         if m:
-            version_str = m.group(1)
-        else:
-            version_str = version
-
-    url = f"https://pypi.org/pypi/{package_name}/json"
+            version_only = m.group(1)
+    
     try:
+        # PyPI API 호출
+        if version_only:
+            url = f"https://pypi.org/pypi/{package_name}/{version_only}/json"
+        else:
+            url = f"https://pypi.org/pypi/{package_name}/json"
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()
-        releases = data.get('releases', {})
-        # 버전이 지정된 경우 해당 버전만, 아니면 최신 버전
-        if version_str and version_str in releases and releases[version_str]:
-            info = None
-            for rel in releases[version_str]:
-                if rel.get('packagetype') == 'sdist' or rel.get('packagetype') == 'bdist_wheel':
-                    info = rel
-                    break
-            if not info:
-                info = data.get('info', {})
-        else:
-            info = data.get('info', {})
+        
         # requires_dist 파싱
-        requires_dist = info.get('requires_dist') if isinstance(info, dict) else None
-        if requires_dist is None:
-            requires_dist = data.get('info', {}).get('requires_dist', [])
-        for req in requires_dist or []:
-            # 예: 'packaging (>=20.0)', 'pyparsing', 'pytest; extra == "test"'
-            req = req.split(';')[0].strip()  # 환경 marker 제거
+        requires_dist = data.get('info', {}).get('requires_dist', [])
+        if not requires_dist:
+            return dependencies
+            
+        for req in requires_dist:
+            # 환경 마커 제거 (예: '; python_version >= "3.6"')
+            req = req.split(';')[0].strip()
             if not req:
                 continue
-            m = re.match(r'^([A-Za-z0-9_.\-]+)(.*)$', req)
-            if m:
-                dep_name = m.group(1)
-                dep_version = m.group(2).strip() if m.group(2) else None
-                # 이미 처리된 패키지인지 확인 (버전 무시)
-                if dep_name.lower() not in processed_packages:
-                    dependencies.add((dep_name, dep_version))
-                else:
-                    print(f"[SKIP] 의존성에서 제외: {dep_name} (이미 처리됨)")
+                
+            # 패키지 이름과 버전 추출
+            match = re.match(r'^([a-zA-Z0-9_\-\.]+)(?:\[.*?\])?(?:\s*([<>=!~].*))?$', req)
+            if match:
+                dep_name = match.group(1).lower()
+                dep_version = match.group(2) if match.group(2) else ''
+                dependencies.add((dep_name, dep_version))
+                print(f"  의존성 발견: {dep_name} {dep_version}")
+                    
     except Exception as e:
-        print(f"PyPI 의존성 파싱 오류: {package_name} {version_str}: {e}")
+        print(f"  [경고] 의존성 정보를 가져오는 중 오류 발생: {str(e)}")
+        
     return dependencies
 
 def parse_requirements(requirements_path):
@@ -216,9 +213,9 @@ def get_all_dependencies(requirements_path, target_dirs, python_version):
         all_packages.add((package_name, version_spec))
         print(f"[의존성 파싱] {package_name} {version_spec if version_spec else ''}")
         # 다운로드
-        download_package_files(package_name, version_spec, target_dirs, python_version)
+        download_package_files(package_name, version_spec, python_version, processed_packages)
         # 의존성 가져오기
-        dependencies = get_package_dependencies(package_name, version_spec)
+        dependencies = get_package_dependencies(package_name, version_spec, processed_packages)
         for dep_name, dep_version_spec in dependencies:
             process_dependencies(dep_name, dep_version_spec)
 
@@ -439,44 +436,80 @@ def get_package_files(package_name, version=None, python_version=None):
         print(f"PyPI API 호출 중 오류 발생: {e}")
         return []
 
-def download_package_files(package_name, version, target_dirs, python_version):
-    """
-    패키지의 모든 파일을 다운로드합니다.
-    
-    Args:
-        package_name (str): 패키지 이름
-        version (str, optional): 패키지 버전
-        target_dirs (dict): 플랫폼별 대상 디렉토리
-        python_version (str): Python 버전
-    """
-    # 이미 처리된 패키지인지 확인 (버전 무시)
+def download_package_files(package_name: str, version: str, python_version: str, processed_packages: set) -> None:
+    """패키지 파일을 다운로드합니다."""
+    # 이미 처리된 패키지인지 확인 (다운로드된 패키지 리스트 기반)
     package_key = package_name.lower()
     if package_key in processed_packages:
-        print(f"[SKIP] 이미 처리됨: {package_name}")
+        print(f"[SKIP] 이미 다운로드됨: {package_name}")
         return
     processed_packages.add(package_key)
 
-    print(f"\n패키지 다운로드 시작: {package_name} (버전: {version if version else '최신'})")
-    files = get_package_files(package_name, version, python_version)
-    print(f"발견된 파일 수: {len(files)}")
+    print(f"\n패키지 다운로드 시작: {package_name} (버전: {version})")
     
-    for url, filename, platform in files:
-        print(f"  파일: {filename} (플랫폼: {platform if platform else '공통'})")
-        if platform == 'win':
-            target_dir = target_dirs['win']
-        elif platform == 'linux':
-            target_dir = target_dirs['linux']
-        else:
-            # 플랫폼 특정 파일이 아닌 경우 모든 디렉토리에 다운로드
-            for dir_path in target_dirs.values():
-                target_path = os.path.join(dir_path, filename)
-                print(f"    다운로드: {url} -> {target_path}")
-                download_file(url, target_path)
-            continue
+    # PyPI API 호출
+    print(f"PyPI API 호출: {package_name} (요청 버전: {version})")
+    files = get_package_files(package_name, version, python_version)
+    
+    if not files:
+        print(f"  [경고] {package_name} {version}에 대한 호환되는 파일을 찾을 수 없습니다.")
+        return
+
+    # 파일 다운로드
+    print(f"발견된 파일 수: {len(files)}")
+    for file_info in files:
+        url = file_info[0]
+        filename = file_info[1]
+        platform = file_info[2]
         
+        print(f"  파일: {filename} (플랫폼: {platform})")
+        
+        # 플랫폼별 디렉토리 결정
+        if platform == 'win':
+            target_dir = f"pypackage_win_x86_64_py{python_version.replace('.', '')}"
+        elif platform == 'linux':
+            target_dir = f"pypackage_linux_amd64_py{python_version.replace('.', '')}"
+        else:  # common
+            target_dir = f"pypackage_win_x86_64_py{python_version.replace('.', '')}"
+        
+        # 디렉토리 생성
+        os.makedirs(target_dir, exist_ok=True)
+        
+        # 파일 다운로드
         target_path = os.path.join(target_dir, filename)
         print(f"    다운로드: {url} -> {target_path}")
-        download_file(url, target_path)
+        
+        try:
+            response = requests.get(url, stream=True)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            block_size = 1024  # 1 KB
+            
+            with open(target_path, 'wb') as f, tqdm(
+                desc=filename,
+                total=total_size,
+                unit='B',
+                unit_scale=True,
+                unit_divisor=1024,
+            ) as bar:
+                for data in response.iter_content(block_size):
+                    f.write(data)
+                    bar.update(len(data))
+            
+            # common 플랫폼인 경우 다른 플랫폼 디렉토리에도 복사
+            if platform == 'common':
+                other_dir = f"pypackage_linux_amd64_py{python_version.replace('.', '')}"
+                os.makedirs(other_dir, exist_ok=True)
+                other_path = os.path.join(other_dir, filename)
+                shutil.copy2(target_path, other_path)
+                print(f"    복사됨: {target_path} -> {other_path}")
+                
+        except Exception as e:
+            print(f"    [오류] 다운로드 실패: {str(e)}")
+            if os.path.exists(target_path):
+                os.remove(target_path)
+            continue
 
 def create_install_scripts(target_dirs, python_version):
     """
@@ -542,30 +575,41 @@ echo "설치가 완료되었습니다."
     print(f"Linux 설치 스크립트 생성됨: {linux_script_path}")
 
 def main():
-    parser = argparse.ArgumentParser(description='PyPI API 기반 패키지 직접 다운로드')
-    parser.add_argument('--requirements-path', help='requirements.txt 파일 경로 (지정하지 않으면 자동으로 찾습니다)')
-    parser.add_argument('--python-version', default='3.12', help='Python 버전 (기본값: 3.12)')
+    """메인 함수"""
+    parser = argparse.ArgumentParser(description='Python 패키지 다운로더')
+    parser.add_argument('--requirements-path', type=str, help='requirements.txt 파일 경로')
+    parser.add_argument('--python-version', type=str, default='3.12', help='Python 버전 (기본값: 3.12)')
     args = parser.parse_args()
-    requirements_path = args.requirements_path or find_requirements_file()
-    if not requirements_path or not os.path.exists(requirements_path):
-        print('requirements.txt 파일을 찾을 수 없습니다.')
-        sys.exit(1)
 
-    # 다운로드 타겟 디렉토리 생성
-    python_version = args.python_version
-    win_dir = f"pypackage_win_x86_64_py{python_version.replace('.', '')}"
-    linux_dir = f"pypackage_linux_amd64_py{python_version.replace('.', '')}"
-    target_dirs = {'win': win_dir, 'linux': linux_dir}
-    for d in target_dirs.values():
-        if os.path.exists(d):
-            shutil.rmtree(d)
-        os.makedirs(d)
+    if not args.requirements_path:
+        parser.print_help()
+        return
 
-    # 의존성까지 재귀적으로 다운로드 (발견 즉시 다운로드)
-    get_all_dependencies(requirements_path, target_dirs, python_version)
+    # requirements.txt 파일 읽기
+    requirements = parse_requirements(args.requirements_path)
+    if not requirements:
+        print("패키지 정보를 찾을 수 없습니다.")
+        return
 
-    # 기존 pip download 방식은 주석 처리
-    # pip_download(requirements_path, args.python_version)
+    # 처리된 패키지 추적을 위한 세트
+    processed_packages = set()
+
+    # 각 패키지 처리
+    for package_name, version_spec in requirements:
+        print(f"\n[패키지 처리] {package_name} {version_spec if version_spec else ''}")
+        # 패키지 다운로드
+        download_package_files(package_name, version_spec, args.python_version, processed_packages)
+        # 의존성 가져오기
+        dependencies = get_package_dependencies(package_name, version_spec, processed_packages)
+        for dep_name, dep_version_spec in dependencies:
+            download_package_files(dep_name, dep_version_spec, args.python_version, processed_packages)
+
+    # 설치 스크립트 생성
+    target_dirs = {
+        'win': f"pypackage_win_x86_64_py{args.python_version.replace('.', '')}",
+        'linux': f"pypackage_linux_amd64_py{args.python_version.replace('.', '')}"
+    }
+    create_install_scripts(target_dirs, args.python_version)
 
 if __name__ == "__main__":
     main()
