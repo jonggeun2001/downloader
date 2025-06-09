@@ -128,6 +128,13 @@ def get_package_dependencies(package_name: str, version: Optional[str] = None) -
             version_str = m.group(1)
         else:
             version_str = version
+
+    # 이미 처리된 패키지인지 확인 (버전 무시)
+    package_key = package_name.lower()
+    if package_key in processed_packages:
+        print(f"[SKIP] 의존성 파싱 건너뜀: {package_name}")
+        return dependencies
+
     url = f"https://pypi.org/pypi/{package_name}/json"
     try:
         response = requests.get(url)

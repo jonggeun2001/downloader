@@ -1,1 +1,1 @@
-apache-airflow-providers-apache-hdfs==4.8.0
+requests==2.32.3
