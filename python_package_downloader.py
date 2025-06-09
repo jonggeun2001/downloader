@@ -295,6 +295,27 @@ def parse_wheel_tag(filename):
         return match.groups()
     return None
 
+def is_python_version_compatible(python_tag: str, python_version: str) -> bool:
+    """
+    wheel 파일의 python_tag가 현재 python_version과 호환되는지 확인
+    예: python_tag='cp312', python_version='3.12' -> True
+    """
+    # python_tag 예시: cp312, py3, py2.py3, cp310.cp311.cp312 등
+    # python_version 예시: '3.12'
+    version_digits = python_version.replace('.', '')
+    # py3, py2.py3 등은 모두 호환
+    if python_tag.startswith('py'):
+        return True
+    # cp312, cp310 등은 정확히 일치해야 함
+    if python_tag.startswith('cp'):
+        return version_digits in python_tag
+    # 여러 태그가 .으로 구분되어 있음
+    tags = python_tag.split('.')
+    for tag in tags:
+        if tag == f'cp{version_digits}' or tag == f'py{python_version[0]}':
+            return True
+    return False
+
 def is_compatible_wheel(filename, python_version):
     """
     wheel 파일이 현재 Python 버전과 호환되는지 확인합니다.
@@ -339,88 +360,78 @@ def is_compatible_wheel(filename, python_version):
 def get_package_files(package_name: str, version: str, python_version: str) -> list:
     """패키지의 파일 정보를 가져옵니다."""
     files = []
-    
     try:
-        # 버전에서 연산자 제거 (예: '==1.2.3' -> '1.2.3')
-        version_only = None
-        if version:
-            m = re.match(r'.*?([0-9][0-9a-zA-Z\.]*)', version)
-            if m:
-                version_only = m.group(1)
-        
-        # PyPI API 호출
-        if version_only:
-            url = f"https://pypi.org/pypi/{package_name}/{version_only}/json"
-        else:
-            url = f"https://pypi.org/pypi/{package_name}/json"
-            
+        # PyPI API 호출 (버전 없이 전체 릴리즈 조회)
+        url = f"https://pypi.org/pypi/{package_name}/json"
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()
-        
-        # 파일 정보 파싱
+
         releases = data.get('releases', {})
         if not releases:
             return files
-            
+
         # 버전 조건에 맞는 릴리즈 찾기
         target_version = None
         if version:
-            # 버전 조건 파싱
-            version_spec = version.strip()
-            if version_spec.startswith('=='):
-                target_version = version_spec[2:]
-            elif version_spec.startswith('>='):
-                min_version = version_spec[2:]
-                # 최신 버전 선택
-                target_version = max(releases.keys(), key=lambda x: packaging.version.parse(x))
-            elif version_spec.startswith('<'):
-                max_version = version_spec[1:]
-                # 최신 버전 선택
-                target_version = max(releases.keys(), key=lambda x: packaging.version.parse(x))
-            else:
-                # 기본적으로 최신 버전 선택
-                target_version = max(releases.keys(), key=lambda x: packaging.version.parse(x))
+            try:
+                spec = packaging.specifiers.SpecifierSet(version)
+                matching_versions = [v for v in releases.keys() if spec.contains(v)]
+                if matching_versions:
+                    # 조건에 맞는 버전 중 가장 최신 버전 선택
+                    target_version = sorted(matching_versions, key=packaging.version.parse, reverse=True)[0]
+                    print(f"  [알림] 버전 조건 '{version}'에 맞는 버전 {target_version}을(를) 선택했습니다.")
+                else:
+                    print(f"  [경고] 버전 조건 '{version}'에 맞는 버전이 없습니다.")
+                    return files
+            except packaging.specifiers.InvalidSpecifier:
+                print(f"  [경고] 잘못된 버전 조건: {version}")
+                return files
         else:
             # 버전이 지정되지 않은 경우 최신 버전 선택
             target_version = max(releases.keys(), key=lambda x: packaging.version.parse(x))
-            
+
         if not target_version:
             print(f"  [경고] {package_name} {version}에 대한 호환되는 버전을 찾을 수 없습니다.")
             return files
-            
+
         # 선택된 버전의 파일들 처리
+        has_wheel = False
         for file_info in releases[target_version]:
             filename = file_info['filename']
             url = file_info['url']
-            
+
             # wheel 파일인 경우
             if filename.endswith('.whl'):
-                # Python 버전 호환성 확인
                 wheel_info = parse_wheel_tag(filename)
                 if not wheel_info:
                     continue
-                    
-                # Python 버전 호환성 확인
-                if not is_python_version_compatible(wheel_info['python_tag'], python_version):
+                if not is_python_version_compatible(wheel_info[0], python_version):
                     continue
-                    
-                # 플랫폼 호환성 확인
-                platform = get_platform_from_wheel(wheel_info['platform_tag'])
+                platform = get_platform_from_wheel(wheel_info[2])
+                # linux의 경우 musllinux, aarch64 제외
+                if platform == 'linux':
+                    tag = wheel_info[2].lower()
+                    if 'musllinux' in tag or 'aarch64' in tag:
+                        continue
                 if not platform:
                     continue
-                    
                 print(f"  호환되는 wheel 파일 발견: {filename}")
                 files.append((url, filename, platform))
-                
-            # tar.gz 소스 파일인 경우
-            elif filename.endswith('.tar.gz'):
-                print(f"  파일 발견: {filename} (플랫폼: 공통)")
-                files.append((url, filename, 'common'))
-                
+                has_wheel = True
+
+        # wheel 파일이 없는 경우에만 tar.gz 파일 처리
+        if not has_wheel:
+            for file_info in releases[target_version]:
+                filename = file_info['filename']
+                url = file_info['url']
+                if filename.endswith('.tar.gz'):
+                    print(f"  파일 발견: {filename} (플랫폼: 공통)")
+                    files.append((url, filename, 'common'))
+
     except Exception as e:
         print(f"  [경고] 파일 정보를 가져오는 중 오류 발생: {str(e)}")
-        
+
     return files
 
 def download_package_files(package_name: str, version: str, python_version: str, processed_packages: set) -> None:
@@ -558,41 +569,99 @@ echo "설치가 완료되었습니다."
     os.chmod(linux_script_path, 0o755)
     print(f"Linux 설치 스크립트 생성됨: {linux_script_path}")
 
+def get_platform_from_wheel(platform_tag: str) -> str:
+    """
+    wheel 파일의 platform_tag에서 win, linux, any(공통) 등을 판별
+    """
+    tag = platform_tag.lower()
+    if 'win' in tag or 'amd64' in tag:
+        return 'win'
+    if 'linux' in tag or 'manylinux' in tag:
+        return 'linux'
+    if 'any' in tag:
+        return 'common'
+    return None
+
+def parse_requirement(requirement: str) -> tuple:
+    """
+    requirements.txt의 각 라인을 파싱하여 패키지 이름과 버전을 반환
+    예: 'requests==2.31.0' -> ('requests', '==2.31.0')
+    """
+    # 주석 제거
+    requirement = requirement.split('#')[0].strip()
+    if not requirement:
+        return None, None
+
+    # 패키지 이름과 버전 분리
+    parts = requirement.split('==', 1)
+    if len(parts) == 1:
+        parts = requirement.split('>=', 1)
+    if len(parts) == 1:
+        parts = requirement.split('<=', 1)
+    if len(parts) == 1:
+        parts = requirement.split('<', 1)
+    if len(parts) == 1:
+        parts = requirement.split('>', 1)
+    if len(parts) == 1:
+        # 버전이 없는 경우
+        return parts[0].strip(), None
+
+    return parts[0].strip(), parts[1].strip()
+
 def main():
     """메인 함수"""
+    # 명령행 인자 파싱
     parser = argparse.ArgumentParser(description='Python 패키지 다운로더')
-    parser.add_argument('--requirements-path', type=str, help='requirements.txt 파일 경로')
-    parser.add_argument('--python-version', type=str, default='3.12', help='Python 버전 (기본값: 3.12)')
+    parser.add_argument('--requirements-path', required=True, help='requirements.txt 파일 경로')
+    parser.add_argument('--python-version', required=True, help='Python 버전 (예: 3.12)')
     args = parser.parse_args()
 
-    if not args.requirements_path:
-        parser.print_help()
-        return
-
-    # requirements.txt 파일 읽기
-    requirements = parse_requirements(args.requirements_path)
-    if not requirements:
-        print("패키지 정보를 찾을 수 없습니다.")
-        return
-
-    # 처리된 패키지 추적을 위한 세트
-    processed_packages = set()
-
-    # 각 패키지 처리
-    for package_name, version_spec in requirements:
-        print(f"\n[패키지 처리] {package_name} {version_spec if version_spec else ''}")
-        # 패키지 다운로드
-        download_package_files(package_name, version_spec, args.python_version, processed_packages)
-        # 의존성 가져오기
-        dependencies = get_package_dependencies(package_name, version_spec, processed_packages)
-        for dep_name, dep_version_spec in dependencies:
-            download_package_files(dep_name, dep_version_spec, args.python_version, processed_packages)
-
-    # 설치 스크립트 생성
+    # 타겟 디렉토리 초기화
     target_dirs = {
         'win': f"pypackage_win_x86_64_py{args.python_version.replace('.', '')}",
         'linux': f"pypackage_linux_amd64_py{args.python_version.replace('.', '')}"
     }
+    
+    print("\n[타겟 디렉토리 초기화]")
+    for target_dir in target_dirs.values():
+        if os.path.exists(target_dir):
+            print(f"  {target_dir} 디렉토리 삭제 중...")
+            shutil.rmtree(target_dir)
+        print(f"  {target_dir} 디렉토리 생성 중...")
+        os.makedirs(target_dir)
+    print("  초기화 완료\n")
+
+    # requirements.txt 파일 읽기
+    with open(args.requirements_path, 'r') as f:
+        requirements = f.read().splitlines()
+
+    # 처리된 패키지 추적을 위한 set
+    processed_packages = set()
+
+    # 각 패키지 처리
+    for requirement in requirements:
+        if not requirement.strip() or requirement.startswith('#'):
+            continue
+
+        print(f"\n[패키지 처리] {requirement}")
+        package_name, version = parse_requirement(requirement)
+        if not package_name:
+            continue
+
+        # 패키지 다운로드
+        download_package_files(package_name, version, args.python_version, processed_packages)
+
+        # 의존성 파싱
+        print(f"[의존성 파싱] {package_name} {version}")
+        dependencies = get_package_dependencies(package_name, version, processed_packages)
+
+        # 의존성 패키지 다운로드
+        for dep_name, dep_version in dependencies:
+            if dep_name not in processed_packages:
+                print(f"\n패키지 다운로드 시작: {dep_name} (버전: {dep_version})")
+                download_package_files(dep_name, dep_version, args.python_version, processed_packages)
+
+    # 설치 스크립트 생성
     create_install_scripts(target_dirs, args.python_version)
 
 if __name__ == "__main__":
