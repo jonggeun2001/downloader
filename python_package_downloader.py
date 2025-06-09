@@ -348,31 +348,53 @@ def get_package_files(package_name, version=None, python_version=None):
     """
     # 버전 문자열에서 연산자 제거 (예: '==1.2.3' -> '1.2.3')
     version_str = None
+    version_spec = None
     if version:
-        m = re.match(r'^[^\d]*([\d.]+)', version)
+        m = re.match(r'^([^\d]*)([\d.]+)', version)
         if m:
-            version_str = m.group(1)
+            version_spec = m.group(1)  # 연산자 (==, >=, <= 등)
+            version_str = m.group(2)   # 버전 숫자
         else:
             version_str = version
-    print(f"PyPI API 호출: {package_name} (요청 버전: {version_str if version_str else '최신'})")
+
+    print(f"PyPI API 호출: {package_name} (요청 버전: {version if version else '최신'})")
     url = f"https://pypi.org/pypi/{package_name}/json"
     try:
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()
         releases = data.get('releases', {})
-        # 버전이 지정된 경우 해당 버전만, 아니면 모든 버전
+        
+        # 버전이 지정된 경우 해당 버전만, 아니면 식에 맞는 버전 1개만 찾기
         if version_str and version_str in releases and releases[version_str]:
             target_versions = [version_str]
         else:
-            # 가장 최신 버전으로 대체
+            # 버전 문자열 연산자에 맞는 버전 1개만 찾기
             available_versions = [v for v in releases.keys() if releases[v]]
             if not available_versions:
                 print(f"  [경고] {package_name}의 사용 가능한 릴리즈가 없습니다.")
                 return []
-            latest_version = sorted(available_versions, key=lambda s: list(map(int, re.findall(r'\d+', s))), reverse=True)[0]
-            print(f"  [알림] 요청한 버전({version_str})이 없으므로 최신 버전({latest_version})으로 대체합니다.")
-            target_versions = [latest_version]
+            
+            # 버전 조건이 있는 경우 해당 조건에 맞는 버전 찾기
+            if version_spec:
+                try:
+                    spec = packaging.specifiers.SpecifierSet(f"{version_spec}{version_str}")
+                    matching_versions = [v for v in available_versions if spec.contains(v)]
+                    if matching_versions:
+                        # 조건에 맞는 버전 중 가장 최신 버전 선택
+                        target_versions = [sorted(matching_versions, key=packaging.version.parse, reverse=True)[0]]
+                        print(f"  [알림] 버전 조건 '{version_spec}{version_str}'에 맞는 버전 {target_versions[0]}을(를) 선택했습니다.")
+                    else:
+                        print(f"  [경고] 버전 조건 '{version_spec}{version_str}'에 맞는 버전이 없습니다.")
+                        return []
+                except packaging.specifiers.InvalidSpecifier:
+                    print(f"  [경고] 잘못된 버전 조건: {version_spec}{version_str}")
+                    return []
+            else:
+                # 버전 조건이 없는 경우 최신 버전 선택
+                target_versions = [sorted(available_versions, key=packaging.version.parse, reverse=True)[0]]
+                print(f"  [알림] 최신 버전 {target_versions[0]}을(를) 선택했습니다.")
+
         files = []
         for ver in target_versions:
             release_files = releases[ver]
