@@ -466,50 +466,47 @@ def download_package_files(package_name: str, version: str, python_version: str,
         
         # 플랫폼별 디렉토리 결정
         if platform == 'win':
-            target_dir = f"pypackage_win_x86_64_py{python_version.replace('.', '')}"
+            target_dirs = [f"pypackage_win_x86_64_py{python_version.replace('.', '')}"]
         elif platform == 'linux':
-            target_dir = f"pypackage_linux_amd64_py{python_version.replace('.', '')}"
+            target_dirs = [f"pypackage_linux_amd64_py{python_version.replace('.', '')}"]
         else:  # common
-            target_dir = f"pypackage_win_x86_64_py{python_version.replace('.', '')}"
+            target_dirs = [
+                f"pypackage_win_x86_64_py{python_version.replace('.', '')}",
+                f"pypackage_linux_amd64_py{python_version.replace('.', '')}"
+            ]
         
-        # 디렉토리 생성
-        os.makedirs(target_dir, exist_ok=True)
-        
-        # 파일 다운로드
-        target_path = os.path.join(target_dir, filename)
-        print(f"    다운로드: {url} -> {target_path}")
-        
-        try:
-            response = requests.get(url, stream=True)
-            response.raise_for_status()
+        # 각 타겟 디렉토리에 다운로드
+        for target_dir in target_dirs:
+            # 디렉토리 생성
+            os.makedirs(target_dir, exist_ok=True)
             
-            total_size = int(response.headers.get('content-length', 0))
-            block_size = 1024  # 1 KB
+            # 파일 다운로드
+            target_path = os.path.join(target_dir, filename)
+            print(f"    다운로드: {url} -> {target_path}")
             
-            with open(target_path, 'wb') as f, tqdm(
-                desc=filename,
-                total=total_size,
-                unit='B',
-                unit_scale=True,
-                unit_divisor=1024,
-            ) as bar:
-                for data in response.iter_content(block_size):
-                    f.write(data)
-                    bar.update(len(data))
-            
-            # common 플랫폼인 경우 다른 플랫폼 디렉토리에도 복사
-            if platform == 'common':
-                other_dir = f"pypackage_linux_amd64_py{python_version.replace('.', '')}"
-                os.makedirs(other_dir, exist_ok=True)
-                other_path = os.path.join(other_dir, filename)
-                shutil.copy2(target_path, other_path)
-                print(f"    복사됨: {target_path} -> {other_path}")
+            try:
+                response = requests.get(url, stream=True)
+                response.raise_for_status()
                 
-        except Exception as e:
-            print(f"    [오류] 다운로드 실패: {str(e)}")
-            if os.path.exists(target_path):
-                os.remove(target_path)
-            continue
+                total_size = int(response.headers.get('content-length', 0))
+                block_size = 1024  # 1 KB
+                
+                with open(target_path, 'wb') as f, tqdm(
+                    desc=filename,
+                    total=total_size,
+                    unit='B',
+                    unit_scale=True,
+                    unit_divisor=1024,
+                ) as bar:
+                    for data in response.iter_content(block_size):
+                        f.write(data)
+                        bar.update(len(data))
+                        
+            except Exception as e:
+                print(f"    [오류] 다운로드 실패: {str(e)}")
+                if os.path.exists(target_path):
+                    os.remove(target_path)
+                continue
 
 def create_install_scripts(target_dirs, python_version):
     """
